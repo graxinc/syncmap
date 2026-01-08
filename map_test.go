@@ -254,6 +254,61 @@ func TestMapRangeNestedCall(t *testing.T) { // Issue 46399
 	}
 }
 
+// TestCheckptrExpunged tests that the expunged pointer sentinel doesn't trigger
+// checkptr failures when V is a type larger than the expunged allocation.
+// Run with: go test -race or go test -gcflags=all=-d=checkptr
+func TestCheckptrExpunged(t *testing.T) {
+	// Object is larger than the expunged allocation (which is `any` = 16 bytes).
+	// This will trigger checkptr if expunged is cast to *Object incorrectly.
+	type Object struct {
+		A, B, C, D int64 // 32 bytes, larger than any's 16 bytes
+	}
+
+	var m syncmap.Map[string, Object]
+
+	// Store a value
+	m.Store("key1", Object{A: 1, B: 2, C: 3, D: 4})
+
+	// Load should work
+	v, ok := m.Load("key1")
+	if !ok || v.A != 1 {
+		t.Fatalf("Load failed: got %v, %v", v, ok)
+	}
+
+	// Delete the key - this sets entry to nil
+	m.Delete("key1")
+
+	// Store a new key to trigger dirtyLocked which marks nil entries as expunged
+	m.Store("key2", Object{A: 5, B: 6, C: 7, D: 8})
+
+	// Now load key1 again - the entry is expunged, and the code compares
+	// the loaded pointer with (*V)(expunged), which triggers checkptr
+	_, ok = m.Load("key1")
+	if ok {
+		t.Fatal("Load should return false for deleted key")
+	}
+
+	// Also test LoadOrStore with an expunged entry
+	m.Store("key3", Object{A: 9})
+	m.Delete("key3")
+	m.Store("key4", Object{A: 10}) // triggers expunge of key3
+
+	actual, loaded := m.LoadOrStore("key3", Object{A: 11})
+	if loaded {
+		t.Fatalf("LoadOrStore should store new value, got loaded=true, actual=%v", actual)
+	}
+
+	// Test Swap with expunged entry
+	m.Store("key5", Object{A: 12})
+	m.Delete("key5")
+	m.Store("key6", Object{A: 13}) // triggers expunge of key5
+
+	prev, loaded := m.Swap("key5", Object{A: 14})
+	if loaded {
+		t.Fatalf("Swap should not find expunged key, got loaded=true, prev=%v", prev)
+	}
+}
+
 // TestConcurrentClear tests concurrent behavior of sync.Map properties to ensure no data races.
 // Checks for proper synchronization between Clear, Store, Load operations.
 func TestConcurrentClear(t *testing.T) {
